@@ -1,0 +1,81 @@
+name: Security Advisory Notification
+
+# Alerts a Discord channel whenever a new security vulnerability is privately
+# reported to the organization, so maintainers are notified as soon as a report
+# comes in rather than relying on individual email subscriptions. Each new
+# report is announced once.
+# Written by Claude
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: advisory-discord-notify
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore seen-advisories cache
+        uses: actions/cache@v6
+        with:
+          path: .state/seen.txt
+          key: advisory-seen-${{ github.run_id }}
+          restore-keys: |
+            advisory-seen-
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.ADVISORY_APP_ID }}
+          private-key: ${{ secrets.ADVISORY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Post new triage advisories to Discord
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          DISCORD_WEBHOOK: ${{ secrets.ADVISORY_DISCORD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          seen=".state/seen.txt"
+          mkdir -p .state && touch "$seen"
+
+          gh api "orgs/${ORG}/security-advisories?state=triage&per_page=100" \
+            | jq -cr '
+                def color: {"critical":13706287,"high":14901769,"medium":13936428,"low":616922,"unknown":7239553};
+                .[]
+                | (.severity // "unknown" | ascii_downcase) as $sev
+                | .ghsa_id,
+                  {
+                    username: "GitHub Security Advisories",
+                    avatar_url: "https://github.githubassets.com/favicons/favicon.png",
+                    embeds: [{
+                      title: (("New vulnerability report: " + (.summary // "untitled")) | .[0:256]),
+                      url: .html_url,
+                      color: (color[$sev] // color["unknown"]),
+                      fields: [
+                        { name: "Repository", value: (.url | if . then (split("/") | .[4:6] | join("/")) else "unknown" end), inline: true },
+                        { name: "Severity", value: $sev, inline: true },
+                        { name: "GHSA", value: .ghsa_id, inline: true }
+                      ],
+                      timestamp: (.created_at // (now | todate))
+                    }]
+                  }
+              ' \
+            | while IFS= read -r ghsa && IFS= read -r payload; do
+                grep -qxF "$ghsa" "$seen" && continue
+                if curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK" >/dev/null; then
+                  echo "posted $ghsa"
+                  echo "$ghsa" >> "$seen"
+                else
+                  echo "::warning::failed to post $ghsa"
+                fi
+                sleep 0.4
+              done
