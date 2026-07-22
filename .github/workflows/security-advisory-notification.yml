@@ -1,9 +1,12 @@
 name: Security Advisory Notification
 
 # Alerts a Discord channel whenever a new security vulnerability is privately
-# reported to the organization, so maintainers are notified as soon as a report
+# reported to the organisation, so maintainers are notified as soon as a report
 # comes in rather than relying on individual email subscriptions. Each new
 # report is announced once.
+#
+# Requires GitHub App permissions: Security advisories (Read), Variables (Read and write).
+#
 # Written by Claude
 
 on:
@@ -21,14 +24,6 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Restore seen-advisories cache
-        uses: actions/cache@v6
-        with:
-          path: .state/seen.txt
-          key: advisory-seen-${{ github.run_id }}
-          restore-keys: |
-            advisory-seen-
-
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -36,46 +31,60 @@ jobs:
           client-id: ${{ vars.ADVISORY_APP_ID }}
           private-key: ${{ secrets.ADVISORY_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: .github
 
       - name: Post new triage advisories to Discord
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
           DISCORD_WEBHOOK: ${{ secrets.ADVISORY_DISCORD_WEBHOOK }}
         run: |
           set -euo pipefail
-          seen=".state/seen.txt"
-          mkdir -p .state && touch "$seen"
 
-          gh api "orgs/${ORG}/security-advisories?state=triage&per_page=100" \
-            | jq -cr '
-                def color: {"critical":13706287,"high":14901769,"medium":13936428,"low":616922,"unknown":7239553};
-                .[]
-                | (.severity // "unknown" | ascii_downcase) as $sev
-                | .ghsa_id,
-                  {
-                    username: "GitHub Security Advisories",
-                    avatar_url: "https://github.githubassets.com/favicons/favicon.png",
-                    embeds: [{
-                      title: (("New vulnerability report: " + (.summary // "untitled")) | .[0:256]),
-                      url: .html_url,
-                      color: (color[$sev] // color["unknown"]),
-                      fields: [
-                        { name: "Repository", value: (.url | if . then (split("/") | .[4:6] | join("/")) else "unknown" end), inline: true },
-                        { name: "Severity", value: $sev, inline: true },
-                        { name: "GHSA", value: .ghsa_id, inline: true }
-                      ],
-                      timestamp: (.created_at // (now | todate))
-                    }]
-                  }
-              ' \
-            | while IFS= read -r ghsa && IFS= read -r payload; do
-                grep -qxF "$ghsa" "$seen" && continue
-                if curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK" >/dev/null; then
-                  echo "posted $ghsa"
-                  echo "$ghsa" >> "$seen"
-                else
-                  echo "::warning::failed to post $ghsa"
-                fi
-                sleep 0.4
-              done
+          if ! seen="$(gh api "repos/${REPO}/actions/variables/ADVISORY_SEEN" --jq '.value' 2>err)"; then
+            grep -q '(HTTP 404)' err || { cat err >&2; exit 1; }
+            seen=""
+          fi
+
+          advisories="$(gh api "orgs/${ORG}/security-advisories?state=triage&per_page=100")"
+
+          while IFS= read -r ghsa && IFS= read -r payload; do
+            grep -qxF "$ghsa" <<<"$seen" && continue
+            if curl -fsS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK" >/dev/null; then
+              echo "posted $ghsa"
+              seen+=$'\n'"$ghsa"
+            else
+              echo "::warning::failed to post $ghsa"
+            fi
+            sleep 0.4
+          done < <(printf '%s' "$advisories" | jq -cr '
+            def color: {"critical":13706287,"high":14901769,"medium":13936428,"low":616922,"unknown":7239553};
+            .[]
+            | (.severity // "unknown" | ascii_downcase) as $sev
+            | .ghsa_id,
+              {
+                username: "GitHub Security Advisories",
+                avatar_url: "https://github.githubassets.com/favicons/favicon.png",
+                embeds: [{
+                  title: (("New vulnerability report: " + (.summary // "untitled")) | .[0:256]),
+                  url: .html_url,
+                  color: (color[$sev] // color["unknown"]),
+                  fields: [
+                    { name: "Repository", value: (.url | if . then (split("/") | .[4:6] | join("/")) else "unknown" end), inline: true },
+                    { name: "Severity", value: $sev, inline: true },
+                    { name: "GHSA", value: .ghsa_id, inline: true }
+                  ],
+                  timestamp: (.created_at // (now | todate))
+                }]
+              }
+          ')
+
+          current="$(printf '%s' "$advisories" | jq -r '.[].ghsa_id')"
+          seen="$(printf '%s\n' "$seen" | grep -Fxf <(printf '%s\n' "$current") | sort -u || true)"
+
+          for attempt in 1 2 3; do
+            gh variable set ADVISORY_SEEN -R "$REPO" --body "$seen" && break
+            [ "$attempt" = 3 ] && { echo "::error::failed to persist ADVISORY_SEEN"; exit 1; }
+            sleep 3
+          done
