@@ -31,7 +31,6 @@ jobs:
           client-id: ${{ vars.ADVISORY_APP_ID }}
           private-key: ${{ secrets.ADVISORY_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: .github
 
       - name: Post new triage advisories to Discord
         env:
