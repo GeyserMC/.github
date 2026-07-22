@@ -83,8 +83,12 @@ jobs:
           current="$(printf '%s' "$advisories" | jq -r '.[].ghsa_id')"
           seen="$(printf '%s\n' "$seen" | grep -Fxf <(printf '%s\n' "$current") | sort -u || true)"
 
-          for attempt in 1 2 3; do
-            gh variable set ADVISORY_SEEN -R "$REPO" --body "$seen" && break
-            [ "$attempt" = 3 ] && { echo "::error::failed to persist ADVISORY_SEEN"; exit 1; }
-            sleep 3
-          done
+          if [ -n "$seen" ]; then
+            for attempt in 1 2 3; do
+              gh variable set ADVISORY_SEEN -R "$REPO" --body "$seen" && break
+              [ "$attempt" = 3 ] && { echo "::error::failed to persist ADVISORY_SEEN"; exit 1; }
+              sleep 3
+            done
+          else
+            gh variable delete ADVISORY_SEEN -R "$REPO" 2>/dev/null || true
+          fi
