@@ -23,6 +23,8 @@ concurrency:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -91,3 +93,12 @@ jobs:
           else
             gh variable delete ADVISORY_SEEN -R "$REPO" 2>/dev/null || true
           fi
+ 
+      - name: Keep workflow enabled
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          id="$(gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}" --jq '.workflow_id')"
+          gh api -X PUT "repos/${REPO}/actions/workflows/${id}/enable"
